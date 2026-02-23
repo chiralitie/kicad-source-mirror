@@ -1551,16 +1551,24 @@ std::vector<std::unique_ptr<PCB_SHAPE>> BOARD_BUILDER::buildShapes( const BLK_0x
 
                 EDA_ANGLE angle = endangle - startangle;
 
-                if( clockwise && angle < ANGLE_0 )
-                    angle += ANGLE_360;
-                if( !clockwise && angle > ANGLE_0 )
+                // Normalize angle to -180 to +180 range first
+                while( angle > ANGLE_180 )
                     angle -= ANGLE_360;
+                while( angle < -ANGLE_180 )
+                    angle += ANGLE_360;
+
+                // Clockwise rotation = negative angle, counter-clockwise = positive.
+                // If the sign doesn't match the direction, flip it.
+                if( clockwise && angle > ANGLE_0 )
+                    angle = -angle;
+                else if( !clockwise && angle < ANGLE_0 )
+                    angle = -angle;
 
                 if( start == end )
                     angle = -ANGLE_360;
 
                 VECTOR2I mid = start;
-                RotatePoint( mid, c, -angle / 2.0 );
+                RotatePoint( mid, c, angle / 2.0 );
 
                 shape->SetArcGeometry( start, mid, end );
             }
@@ -2449,14 +2457,21 @@ std::vector<std::unique_ptr<BOARD_ITEM>> BOARD_BUILDER::buildTrack( const BLK_0x
 
             EDA_ANGLE angle = endAngle - startAngle;
 
-            if( clockwise && angle < ANGLE_0 )
+            // Normalize angle to -180 to +180 range first
+            while( angle > ANGLE_180 )
+                angle -= ANGLE_360;
+            while( angle < -ANGLE_180 )
                 angle += ANGLE_360;
 
-            if( !clockwise && angle > ANGLE_0 )
-                angle -= ANGLE_360;
+            // Clockwise rotation = negative angle, counter-clockwise = positive.
+            // If the sign doesn't match the direction, flip it.
+            if( clockwise && angle > ANGLE_0 )
+                angle = -angle;
+            else if( !clockwise && angle < ANGLE_0 )
+                angle = -angle;
 
             VECTOR2I mid = start;
-            RotatePoint( mid, c, -angle / 2.0 );
+            RotatePoint( mid, c, angle / 2.0 );
 
             std::unique_ptr<PCB_ARC> arc = std::make_unique<PCB_ARC>( &m_board );
 
@@ -2745,14 +2760,21 @@ void BOARD_BUILDER::createBoardOutline()
 
                     EDA_ANGLE angle = endangle - startangle;
 
-                    if( clockwise && angle < ANGLE_0 )
+                    // Normalize angle to -180 to +180 range first
+                    while( angle > ANGLE_180 )
+                        angle -= ANGLE_360;
+                    while( angle < -ANGLE_180 )
                         angle += ANGLE_360;
 
-                    if( !clockwise && angle > ANGLE_0 )
-                        angle -= ANGLE_360;
+                    // Clockwise rotation = negative angle, counter-clockwise = positive.
+                    // If the sign doesn't match the direction, flip it.
+                    if( clockwise && angle > ANGLE_0 )
+                        angle = -angle;
+                    else if( !clockwise && angle < ANGLE_0 )
+                        angle = -angle;
 
                     VECTOR2I mid = start;
-                    RotatePoint( mid, c, -angle / 2.0 );
+                    RotatePoint( mid, c, angle / 2.0 );
 
                     shape->SetArcGeometry( start, mid, end );
                 }
