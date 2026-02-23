@@ -1377,6 +1377,7 @@ void BOARD_BUILDER::applyGlobalConstraints()
     int minViaDiameter = INT_MAX;
     int minViaDrill = INT_MAX;
     int minThroughHole = INT_MAX;
+    int minAnnularWidth = INT_MAX;
 
     // Get minimum clearance from constraint sets (already parsed in applyConstraintSets)
     std::shared_ptr<NET_SETTINGS> netSettings = bds.m_NetSettings;
@@ -1415,22 +1416,48 @@ void BOARD_BUILDER::applyGlobalConstraints()
             {
                 minViaDrill = std::min( minViaDrill, viaDrill );
                 minThroughHole = std::min( minThroughHole, viaDrill );
+
+                // Annular width = (diameter - drill) / 2
+                if( viaWidth > viaDrill )
+                {
+                    int annular = ( viaWidth - viaDrill ) / 2;
+                    minAnnularWidth = std::min( minAnnularWidth, annular );
+                }
             }
         }
     }
 
-    // Scan all pads for minimum drill size
+    // Scan all pads for minimum drill size and annular width
     for( FOOTPRINT* fp : m_board.Footprints() )
     {
         for( PAD* pad : fp->Pads() )
         {
             VECTOR2I drillSize = pad->GetDrillSize();
+            VECTOR2I padSize = pad->GetSize( F_Cu );
 
             if( drillSize.x > 0 )
+            {
                 minThroughHole = std::min( minThroughHole, drillSize.x );
 
+                // Annular width for X direction
+                if( padSize.x > drillSize.x )
+                {
+                    int annular = ( padSize.x - drillSize.x ) / 2;
+                    minAnnularWidth = std::min( minAnnularWidth, annular );
+                }
+            }
+
             if( drillSize.y > 0 )
+            {
                 minThroughHole = std::min( minThroughHole, drillSize.y );
+
+                // Annular width for Y direction
+                if( padSize.y > drillSize.y )
+                {
+                    int annular = ( padSize.y - drillSize.y ) / 2;
+                    minAnnularWidth = std::min( minAnnularWidth, annular );
+                }
+            }
         }
     }
 
@@ -1473,6 +1500,28 @@ void BOARD_BUILDER::applyGlobalConstraints()
             wxLogTrace( traceAllegroBuilder, "Updated m_MinThroughDrill (pad drill) = %d nm (%.3f mil)",
                         minThroughHole, minThroughHole / 25400.0 );
         }
+    }
+
+    if( minAnnularWidth != INT_MAX && minAnnularWidth > 0 )
+    {
+        bds.m_ViasMinAnnularWidth = minAnnularWidth;
+        wxLogTrace( traceAllegroBuilder, "Set m_ViasMinAnnularWidth = %d nm (%.3f mil)",
+                    minAnnularWidth, minAnnularWidth / 25400.0 );
+    }
+
+    // Update zone minimum thickness based on extracted minimum track width
+    // This ensures zones can fill into tight spaces without isolating pads
+    if( minTrackWidth != INT_MAX && minTrackWidth > 0 )
+    {
+        for( ZONE* zone : m_board.Zones() )
+        {
+            if( !zone->GetIsRuleArea() )
+            {
+                zone->SetMinThickness( minTrackWidth );
+            }
+        }
+        wxLogTrace( traceAllegroBuilder, "Updated zone min thickness to %d nm (%.3f mil)",
+                    minTrackWidth, minTrackWidth / 25400.0 );
     }
 
     wxLogTrace( traceAllegroBuilder, "Global constraints applied" );
@@ -3234,6 +3283,10 @@ std::unique_ptr<ZONE> BOARD_BUILDER::buildZone( const BLK_0x28_SHAPE& aShape, in
     {
         zone->SetLayer( layer );
         zone->SetFillMode( ZONE_FILL_MODE::POLYGONS );
+        zone->SetPadConnection( ZONE_CONNECTION::FULL );  // Solid connection by default
+        zone->SetIslandRemovalMode( ISLAND_REMOVAL_MODE::NEVER );  // Keep small islands
+        // Don't set MinThickness here - let KiCad use its default or the value
+        // will be updated later based on the net's constraints
     }
     else
     {
@@ -3249,6 +3302,38 @@ std::unique_ptr<ZONE> BOARD_BUILDER::buildZone( const BLK_0x28_SHAPE& aShape, in
     // Set net code AFTER layer assignment. SetNetCode checks IsOnCopperLayer() and
     // forces net=0 if the zone isn't on a copper layer yet.
     zone->SetNetCode( aNetcode );
+
+    // Apply clearance from the net's netclass
+    if( aNetcode != NETINFO_LIST::UNCONNECTED )
+    {
+        NETINFO_ITEM* netInfo = m_board.FindNet( aNetcode );
+        if( netInfo )
+        {
+            NETCLASS* nc = netInfo->GetNetClass();
+            if( nc && nc->HasClearance() && nc->GetClearance() > 0 )
+            {
+                zone->SetLocalClearance( nc->GetClearance() );
+            }
+        }
+    }
+
+    // Set zone priority based on area - smaller zones get higher priority
+    // so they don't get eroded by larger zones during fill
+    BOX2I bbox = outline.BBox();
+    double area = static_cast<double>( bbox.GetWidth() ) * bbox.GetHeight();
+
+    // Map area to priority: smaller area = higher priority
+    // Use logarithmic scale, cap at reasonable values
+    // Area in nm^2, typical board ~100mm x 100mm = 1e16 nm^2
+    unsigned int priority = 0;
+    if( area > 0 )
+    {
+        // log10(1e16) = 16, log10(1e10) = 10
+        // Invert so smaller = higher priority, scale to 0-200 range
+        double logArea = std::log10( area );
+        priority = static_cast<unsigned int>( std::max( 0.0, 200.0 - logArea * 10.0 ) );
+    }
+    zone->SetAssignedPriority( priority );
 
     zone->AddPolygon( outline );
     return zone;
