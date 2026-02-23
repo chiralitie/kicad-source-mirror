@@ -2919,6 +2919,108 @@ void BOARD_BUILDER::createBoardOutline()
         }
     }
 
+    // Fallback: if no outline shapes found in 0x24/0x28, check 0x14 GRAPHIC blocks
+    if( outlineItems.empty() )
+    {
+        wxLogTrace( traceAllegroBuilder, "No outline shapes found in 0x24/0x28, checking 0x14 graphics" );
+
+        const LL_WALKER graphicWalker( m_brdDb.m_Header->m_LL_0x14, m_brdDb );
+
+        for( const BLOCK_BASE* block : graphicWalker )
+        {
+            if( block->GetBlockType() != 0x14 )
+                continue;
+
+            const BLK_0x14_GRAPHIC& graphicData = static_cast<const BLOCK<BLK_0x14_GRAPHIC>&>( *block ).GetData();
+
+            if( !m_layerMapper->IsOutlineLayer( graphicData.m_Layer ) )
+                continue;
+
+            shapeCount++;
+
+            // Walk the segments in this graphic
+            const LL_WALKER segWalker{ graphicData.m_SegmentPtr, graphicData.m_Key, m_brdDb };
+
+            for( const BLOCK_BASE* segBlock : segWalker )
+            {
+                std::unique_ptr<PCB_SHAPE> shape = std::make_unique<PCB_SHAPE>( &m_board );
+                shape->SetLayer( Edge_Cuts );
+
+                switch( segBlock->GetBlockType() )
+                {
+                case 0x01:
+                {
+                    const auto& arc = static_cast<const BLOCK<BLK_0x01_ARC>&>( *segBlock ).GetData();
+
+                    VECTOR2I start = scale( { arc.m_StartX, arc.m_StartY } );
+                    VECTOR2I end = scale( { arc.m_EndX, arc.m_EndY } );
+                    VECTOR2I c = scale( KiROUND( VECTOR2D{ arc.m_CenterX, arc.m_CenterY } ) );
+
+                    shape->SetWidth( m_board.GetDesignSettings().GetLineThickness( Edge_Cuts ) );
+
+                    if( start == end )
+                    {
+                        shape->SetShape( SHAPE_T::CIRCLE );
+                        shape->SetCenter( c );
+                        shape->SetEnd( start );
+                    }
+                    else
+                    {
+                        shape->SetShape( SHAPE_T::ARC );
+
+                        bool clockwise = ( arc.m_SubType & 0x40 ) != 0;
+
+                        EDA_ANGLE startAngle( start - c );
+                        EDA_ANGLE endAngle( end - c );
+                        startAngle.Normalize();
+                        endAngle.Normalize();
+                        EDA_ANGLE angle = endAngle - startAngle;
+
+                        // Normalize angle to -180 to +180 range first
+                        while( angle > ANGLE_180 )
+                            angle -= ANGLE_360;
+                        while( angle < -ANGLE_180 )
+                            angle += ANGLE_360;
+
+                        // Clockwise rotation = negative angle, counter-clockwise = positive.
+                        // If the sign doesn't match the direction, flip it.
+                        if( clockwise && angle > ANGLE_0 )
+                            angle = -angle;
+                        else if( !clockwise && angle < ANGLE_0 )
+                            angle = -angle;
+
+                        VECTOR2I mid = start;
+                        RotatePoint( mid, c, angle / 2.0 );
+
+                        shape->SetArcGeometry( start, mid, end );
+                    }
+                    break;
+                }
+                case 0x15:
+                case 0x16:
+                case 0x17:
+                {
+                    const auto& seg = static_cast<const BLOCK<BLK_0x15_16_17_SEGMENT>&>( *segBlock ).GetData();
+
+                    VECTOR2I start = scale( { seg.m_StartX, seg.m_StartY } );
+                    VECTOR2I end = scale( { seg.m_EndX, seg.m_EndY } );
+
+                    shape->SetShape( SHAPE_T::SEGMENT );
+                    shape->SetStart( start );
+                    shape->SetEnd( end );
+                    shape->SetWidth( m_board.GetDesignSettings().GetLineThickness( Edge_Cuts ) );
+                    break;
+                }
+                default:
+                    continue;
+                }
+
+                outlineItems.push_back( shape.get() );
+                m_board.Add( shape.release(), ADD_MODE::BULK_APPEND );
+            }
+        }
+    }
+
     if( !outlineItems.empty() )
     {
         m_board.FinalizeBulkAdd( outlineItems );
