@@ -1365,6 +1365,120 @@ void BOARD_BUILDER::applyMatchGroups()
 }
 
 
+void BOARD_BUILDER::applyGlobalConstraints()
+{
+    wxLogTrace( traceAllegroBuilder, "Extracting global design constraints from board objects" );
+
+    BOARD_DESIGN_SETTINGS& bds = m_board.GetDesignSettings();
+
+    // Track minimum values found in the design
+    int minTrackWidth = INT_MAX;
+    int minClearance = INT_MAX;
+    int minViaDiameter = INT_MAX;
+    int minViaDrill = INT_MAX;
+    int minThroughHole = INT_MAX;
+
+    // Get minimum clearance from constraint sets (already parsed in applyConstraintSets)
+    std::shared_ptr<NET_SETTINGS> netSettings = bds.m_NetSettings;
+
+    for( const auto& [name, nc] : netSettings->GetNetclasses() )
+    {
+        if( nc->HasClearance() && nc->GetClearance() > 0 )
+            minClearance = std::min( minClearance, nc->GetClearance() );
+
+        if( nc->HasTrackWidth() && nc->GetTrackWidth() > 0 )
+            minTrackWidth = std::min( minTrackWidth, nc->GetTrackWidth() );
+
+        if( nc->HasViaDiameter() && nc->GetViaDiameter() > 0 )
+            minViaDiameter = std::min( minViaDiameter, nc->GetViaDiameter() );
+
+        if( nc->HasViaDrill() && nc->GetViaDrill() > 0 )
+            minViaDrill = std::min( minViaDrill, nc->GetViaDrill() );
+    }
+
+    // Scan all tracks for minimum width
+    for( PCB_TRACK* track : m_board.Tracks() )
+    {
+        if( track->GetWidth() > 0 )
+            minTrackWidth = std::min( minTrackWidth, track->GetWidth() );
+
+        if( track->Type() == PCB_VIA_T )
+        {
+            PCB_VIA* via = static_cast<PCB_VIA*>( track );
+            int viaWidth = via->GetWidth( F_Cu );
+            int viaDrill = via->GetDrill();
+
+            if( viaWidth > 0 )
+                minViaDiameter = std::min( minViaDiameter, viaWidth );
+
+            if( viaDrill > 0 )
+            {
+                minViaDrill = std::min( minViaDrill, viaDrill );
+                minThroughHole = std::min( minThroughHole, viaDrill );
+            }
+        }
+    }
+
+    // Scan all pads for minimum drill size
+    for( FOOTPRINT* fp : m_board.Footprints() )
+    {
+        for( PAD* pad : fp->Pads() )
+        {
+            VECTOR2I drillSize = pad->GetDrillSize();
+
+            if( drillSize.x > 0 )
+                minThroughHole = std::min( minThroughHole, drillSize.x );
+
+            if( drillSize.y > 0 )
+                minThroughHole = std::min( minThroughHole, drillSize.y );
+        }
+    }
+
+    // Apply the extracted minimums to board design settings
+    if( minTrackWidth != INT_MAX && minTrackWidth > 0 )
+    {
+        bds.m_TrackMinWidth = minTrackWidth;
+        wxLogTrace( traceAllegroBuilder, "Set m_TrackMinWidth = %d nm (%.3f mil)",
+                    minTrackWidth, minTrackWidth / 25400.0 );
+    }
+
+    if( minClearance != INT_MAX && minClearance > 0 )
+    {
+        bds.m_MinClearance = minClearance;
+        wxLogTrace( traceAllegroBuilder, "Set m_MinClearance = %d nm (%.3f mil)",
+                    minClearance, minClearance / 25400.0 );
+    }
+
+    if( minViaDiameter != INT_MAX && minViaDiameter > 0 )
+    {
+        bds.m_ViasMinSize = minViaDiameter;
+        wxLogTrace( traceAllegroBuilder, "Set m_ViasMinSize = %d nm (%.3f mil)",
+                    minViaDiameter, minViaDiameter / 25400.0 );
+    }
+
+    if( minViaDrill != INT_MAX && minViaDrill > 0 )
+    {
+        bds.m_MinThroughDrill = minViaDrill;
+        wxLogTrace( traceAllegroBuilder, "Set m_MinThroughDrill (via drill) = %d nm (%.3f mil)",
+                    minViaDrill, minViaDrill / 25400.0 );
+    }
+
+    if( minThroughHole != INT_MAX && minThroughHole > 0 )
+    {
+        // m_MinThroughDrill is the minimum for all through holes (vias and pads)
+        // Use the smaller of via drill and pad drill
+        if( minThroughHole < bds.m_MinThroughDrill || bds.m_MinThroughDrill == 0 )
+        {
+            bds.m_MinThroughDrill = minThroughHole;
+            wxLogTrace( traceAllegroBuilder, "Updated m_MinThroughDrill (pad drill) = %d nm (%.3f mil)",
+                        minThroughHole, minThroughHole / 25400.0 );
+        }
+    }
+
+    wxLogTrace( traceAllegroBuilder, "Global constraints applied" );
+}
+
+
 void BOARD_BUILDER::setupLayers()
 {
     wxLogTrace( traceAllegroBuilder, "Setting up layer mapping from Allegro to KiCad" );
@@ -3597,6 +3711,9 @@ bool BOARD_BUILDER::BuildBoard()
     wxLogTrace( traceAllegroBuilder, "Converted %zu footprints", bulkAddedItems.size() );
 
     enablePadTeardrops();
+
+    // Apply global constraints after all objects are created so we can scan for minimums
+    applyGlobalConstraints();
 
     wxLogTrace( traceAllegroBuilder, "Board construction completed successfully" );
     return true;

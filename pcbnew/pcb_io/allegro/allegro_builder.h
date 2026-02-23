@@ -161,6 +161,7 @@ private:
     void applyConstraintSets();
     void applyNetConstraints();
     void applyMatchGroups();
+    void applyGlobalConstraints();
 
     /**
      * Get the font definition for a given index in a 0x30, etc.
